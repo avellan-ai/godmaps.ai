@@ -1,0 +1,35 @@
+# The stack on the boat sandbox. boat-deploy.sh writes the two env files into
+# GODMAPS_ENV_DIR, outside the checkout, and starts this file.
+name: godmaps
+
+services:
+  app:
+    build:
+      context: ..
+    # The build bakes the browser keys into dist/, so it runs once per
+    # container. A resumed sandbox restarts the same container and skips it.
+    command:
+      - sh
+      - -c
+      - >-
+        [ -f dist/.built ] || { npx vite build && touch dist/.built; } &&
+        exec npx vite preview --host 0.0.0.0 --port 4173 --strictPort
+    env_file:
+      - ${GODMAPS_ENV_DIR:?}/app.env
+    environment:
+      GEV_ALLOWED_HOSTS: ${PUBLIC_HOST:?}
+    healthcheck:
+      start_period: 300s
+    restart: unless-stopped
+
+  gate:
+    image: docker.io/library/caddy:2.10.2-alpine
+    env_file:
+      - ${GODMAPS_ENV_DIR:?}/gate.env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - '${GATE_PORT:?}:${GATE_PORT:?}'
+    depends_on:
+      - app
+    restart: unless-stopped

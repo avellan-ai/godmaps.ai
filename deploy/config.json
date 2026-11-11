@@ -1,0 +1,13 @@
+{
+  "publicHost": "godmaps.ai",
+  "sandboxName": "godmaps-demo",
+  "sandboxPort": 4173,
+  "idleMinutes": 30,
+  "blockedPrefixes": [
+    "/mcp",
+    "/api/setup/",
+    "/api/realtime/oauth-",
+    "/api/realtime/debug-log",
+    "/api/local-receivers/"
+  ]
+}

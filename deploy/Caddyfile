@@ -1,0 +1,47 @@
+# Every value in braces with a dollar sign comes from the gate's environment,
+# which boat-deploy.sh generates from config.json. The secret is never in git.
+{
+	admin off
+	auto_https off
+}
+
+:{$GATE_PORT} {
+	route {
+		@unauthenticated not header X-Godmaps-Gate {$GATE_SECRET}
+		respond @unauthenticated 403
+
+		header X-Robots-Tag "noindex, nofollow"
+		header X-Godmaps-Gate-Up 1
+
+		@blocked path {$GATE_BLOCKED_PATHS}
+		respond @blocked 404
+
+		# The app compares Origin with http://<Host> because its own hop is
+		# plain http. Only the public origin is rewritten, so any other Origin
+		# still fails the app's same-site check.
+		@public_origin header Origin https://{$PUBLIC_HOST}
+		request_header @public_origin Origin http://{$PUBLIC_HOST}
+
+		reverse_proxy app:4173 {
+			flush_interval -1
+			header_up Host {$PUBLIC_HOST}
+			header_up -X-Godmaps-Gate
+			header_up -Forwarded
+			header_up -Via
+			header_up -X-Forwarded-For
+			header_up -X-Forwarded-Host
+			header_up -X-Forwarded-Port
+			header_up -X-Forwarded-Proto
+			header_up -X-Real-Ip
+			header_up -Cf-Connecting-Ip
+			header_up -Cf-Ray
+		}
+	}
+
+	# The app container is still starting. The Worker reads this header and
+	# waits instead of showing the error.
+	handle_errors {
+		header X-Godmaps-App-Down 1
+		respond 503
+	}
+}
