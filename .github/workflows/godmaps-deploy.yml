@@ -1,0 +1,98 @@
+name: godmaps deploy
+
+# Deploys the pushed commit: the boat sandbox first, then the Cloudflare
+# Worker. The secrets live in the `production` environment. Until they are
+# set, the job says which are missing and ends green.
+on:
+  push:
+    branches: [godmaps]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: godmaps-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    if: github.repository == 'avellan-ai/godmaps.ai' && github.ref == 'refs/heads/godmaps'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check that the deploy secrets are set
+        id: secrets
+        env:
+          HAS_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+          HAS_BOAT_DEPLOY_API_KEY: ${{ secrets.BOAT_DEPLOY_API_KEY != '' }}
+          HAS_BOAT_WORKER_API_KEY: ${{ secrets.BOAT_WORKER_API_KEY != '' }}
+          HAS_GODMAPS_SANDBOX_ID: ${{ secrets.GODMAPS_SANDBOX_ID != '' }}
+          HAS_GODMAPS_GATE_SECRET: ${{ secrets.GODMAPS_GATE_SECRET != '' }}
+        run: |
+          missing=$(env | sed -n 's/^HAS_\(.*\)=false$/\1/p' | sort | tr '\n' ' ')
+          if [ -n "$missing" ]; then
+            echo "::notice title=Deploy skipped::These secrets are not set in the production environment: $missing"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Use Node.js
+        if: steps.secrets.outputs.ready == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.22.2
+
+      - name: Install the boat CLI
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          curl -fsSL https://boat.dev/install | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Deploy the sandbox and the Worker
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          BOAT_NO_UPDATE: '1'
+          BOAT_DEPLOY_API_KEY: ${{ secrets.BOAT_DEPLOY_API_KEY }}
+          BOAT_WORKER_API_KEY: ${{ secrets.BOAT_WORKER_API_KEY }}
+          GODMAPS_SANDBOX_ID: ${{ secrets.GODMAPS_SANDBOX_ID }}
+          GODMAPS_GATE_SECRET: ${{ secrets.GODMAPS_GATE_SECRET }}
+          GODMAPS_APP_ENV: ${{ secrets.GODMAPS_APP_ENV }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GODMAPS_STATE_DIR: ${{ runner.temp }}/godmaps
+        run: |
+          umask 077
+          printf '%s' "$BOAT_DEPLOY_API_KEY" | boat login --key-stdin > /dev/null
+          if [ -n "$GODMAPS_APP_ENV" ]; then
+            printf '%s\n' "$GODMAPS_APP_ENV" > "$RUNNER_TEMP/app.env"
+            deploy/boat-deploy.sh sandbox "$RUNNER_TEMP/app.env" > /dev/null
+          else
+            deploy/boat-deploy.sh sandbox > /dev/null
+          fi
+          deploy/boat-deploy.sh worker
+
+      - name: Check that the sandbox refuses a request without the gate secret
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          GODMAPS_STATE_DIR: ${{ runner.temp }}/godmaps
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$(cat "$GODMAPS_STATE_DIR/sandbox-url")/api/military")
+          if [ "$code" != 403 ]; then
+            echo "::error::The sandbox answered $code to a request without the gate secret. Expected 403."
+            exit 1
+          fi
+          echo "The sandbox refused a request without the gate secret (403)."
+
+      - name: Remove the secrets from the runner
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/godmaps" "$RUNNER_TEMP/app.env" "$HOME/.config/boat" "$HOME/.config/ascii"
